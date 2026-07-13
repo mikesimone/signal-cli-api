@@ -3,12 +3,14 @@ mod jsonrpc;
 mod middleware;
 mod routes;
 mod state;
+mod watchdog;
 mod webhooks;
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware as axum_mw;
 use clap::Parser;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
@@ -72,6 +74,16 @@ async fn main() -> anyhow::Result<()> {
     // Spawn webhook dispatcher
     let webhook_state = app_state.clone();
     tokio::spawn(webhooks::dispatch_loop(webhook_state));
+
+    // Tell systemd we're up (no-op unless run under Type=notify), then start
+    // the watchdog heartbeat - see watchdog.rs for why this exists.
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    let watchdog_state = app_state.clone();
+    tokio::spawn(watchdog::heartbeat_loop(
+        watchdog_state,
+        Duration::from_secs(15),
+        Duration::from_secs(10),
+    ));
 
     let app = routes::router(app_state)
         .layer(axum_mw::from_fn(middleware::request_tracing))
