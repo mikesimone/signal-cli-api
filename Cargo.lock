@@ -1557,6 +1557,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-server",
+ "base64",
  "clap",
  "dashmap",
  "futures-util",
