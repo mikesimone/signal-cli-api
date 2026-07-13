@@ -119,5 +119,22 @@ pub async fn spawn() -> anyhow::Result<ManagedDaemon> {
     }
     tracing::info!("signal-cli daemon ready on {addr}");
 
+    // Continuously drain the child's stderr for the rest of its life. Up to
+    // this point nothing has read it outside the startup-wait loop above; a
+    // Linux pipe buffer is ~64KB, and once signal-cli logs enough to fill it
+    // (e.g. while handling a large or problematic attachment) its write()
+    // call blocks and the whole JVM stalls - no crash, no OOM, nothing in
+    // any log to point at, it just silently stops responding. This was the
+    // actual cause of the "hangs" this daemon kept needing a restart for.
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::warn!(target: "signal_cli_stderr", "{line}");
+            }
+        });
+    }
+
     Ok(ManagedDaemon { child, pid, addr })
 }
