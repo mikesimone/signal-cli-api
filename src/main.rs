@@ -5,6 +5,7 @@ mod routes;
 mod state;
 mod webhooks;
 
+use axum::extract::DefaultBodyLimit;
 use axum::middleware as axum_mw;
 use clap::Parser;
 use std::net::SocketAddr;
@@ -74,7 +75,12 @@ async fn main() -> anyhow::Result<()> {
 
     let app = routes::router(app_state)
         .layer(axum_mw::from_fn(middleware::request_tracing))
-        .layer(CorsLayer::permissive());
+        .layer(CorsLayer::permissive())
+        // Axum's default body limit is 2MB, which a base64-encoded video
+        // attachment blows through instantly (send/attachment payloads embed
+        // the whole file inline as a data URI). 300MB comfortably covers
+        // Signal's own attachment size ceiling plus base64/JSON overhead.
+        .layer(DefaultBodyLimit::max(300 * 1024 * 1024));
 
     let requested: SocketAddr = cli.listen.parse()?;
 

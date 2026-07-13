@@ -107,7 +107,13 @@ impl AppState {
             next_id: Arc::new(AtomicU64::new(1)),
             metrics: Arc::new(Metrics::default()),
             webhooks: Arc::new(RwLock::new(Vec::new())),
-            rpc_timeout: Duration::from_secs(30),
+            // Was 30s - group sends with attachments to larger member lists can
+            // legitimately take longer than that on signal-cli's side, and a
+            // timeout here doesn't cancel the underlying request (already
+            // written to signal-cli's stdin) - it just stops waiting for the
+            // response, so a too-short timeout produces spurious 504s for
+            // sends that actually succeed. httpx client-side timeout is 180s.
+            rpc_timeout: Duration::from_secs(120),
         }
     }
 
