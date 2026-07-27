@@ -1,11 +1,13 @@
 use axum::extract::{Path, State};
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::put;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::state::AppState;
+use super::avatar::spill_avatar_to_disk;
 use super::helpers::rpc_ok;
 
 pub fn routes() -> Router<AppState> {
@@ -32,8 +34,18 @@ async fn update_profile(
     if let Some(about) = &body.about {
         params["about"] = json!(about);
     }
-    if let Some(avatar) = &body.base64_avatar {
-        params["avatar"] = json!(avatar);
-    }
+    let _spilled = if let Some(avatar) = &body.base64_avatar {
+        match spill_avatar_to_disk(avatar) {
+            Ok((path, guard)) => {
+                params["avatar"] = json!(path.to_string_lossy());
+                Some(guard)
+            }
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response();
+            }
+        }
+    } else {
+        None
+    };
     rpc_ok(&st, "updateProfile", params).await
 }

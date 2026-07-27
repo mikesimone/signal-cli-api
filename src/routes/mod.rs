@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod avatar;
 pub mod helpers;
 pub mod attachments;
 pub mod config;

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::state::AppState;
+use super::avatar::spill_avatar_to_disk;
 use super::helpers::{rpc_ok, rpc_created};
 
 pub fn routes() -> Router<AppState> {
@@ -112,9 +113,19 @@ async fn update_group(
     if let Some(desc) = &body.description {
         params["description"] = json!(desc);
     }
-    if let Some(avatar) = &body.base64_avatar {
-        params["avatar"] = json!(avatar);
-    }
+    let _spilled = if let Some(avatar) = &body.base64_avatar {
+        match spill_avatar_to_disk(avatar) {
+            Ok((path, guard)) => {
+                params["avatar"] = json!(path.to_string_lossy());
+                Some(guard)
+            }
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response();
+            }
+        }
+    } else {
+        None
+    };
     if let Some(exp) = body.expiration {
         params["expiration"] = json!(exp);
     }
