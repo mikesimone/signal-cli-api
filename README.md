@@ -80,6 +80,60 @@ curl -X POST http://localhost:8080/v2/send \
 {"timestamp": 1234567890}
 ```
 
+### The `send` contract: raw passthrough by design
+
+`/v1/send` and `/v2/send` are a **deliberate, undocumented-field-friendly
+passthrough** to signal-cli's `send` JSON-RPC method — the request body is
+forwarded to signal-cli almost verbatim (see "Attachments" below for the one
+exception), with no field whitelist. This is a decided design choice, not an
+oversight: it's what lets every signal-cli `send` capability work here
+immediately, including ones this README doesn't spell out, without waiting
+on a matching typed field to be added to this project first.
+
+Field names match signal-cli's own JSON-RPC parameter names (the same names
+you'd use with `signal-cli --output=json jsonRpc`), **not** a REST-ified
+alias set — with one built-in convenience: `recipients` (plural) is accepted
+as an alias for `recipient`, courtesy of signal-cli's own JSON-RPC parameter
+binding (it falls back from a missing `recipient` key to `recipients`). No
+other pluralized/renamed alias is supported. In particular:
+
+- `account` is required (not `number`) — signal-cli only resolves the
+  sending account from a top-level `account` field. On a daemon with more
+  than one registered account (this deployment has two), a `number` field
+  is silently ignored and the call fails with "Method requires valid
+  account parameter."
+- `attachment` is the real field for attachments (not `base64_attachments`),
+  and takes an array of either data URIs
+  (`data:<mime>;filename=<name>;base64,<data>`) or file paths already on the
+  signal-cli host.
+
+Commonly-used fields beyond the basics, confirmed to work purely because the
+passthrough has no whitelist:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `editTimestamp` | number | Edit a previously-sent message in place |
+| `quoteTimestamp` / `quoteAuthor` / `quoteMessage` | number / string / string | Quote a prior message |
+| `storyTimestamp` / `storyAuthor` | number / string | Reply to a story |
+| `mention` | array of `"start:length:recipient"` strings | @-mention a group member |
+| `textStyle` | array of `"start:length:STYLE"` strings | Bold/italic/strikethrough/spoiler/monospace spans |
+| `noUrgent` | bool | Suppress the push notification (still delivered in real time if the app is open) |
+| `viewOnce` | bool | Send as a view-once message |
+| `sticker` | `"packId:stickerId"` string | Send a sticker |
+| `previewUrl` / `previewTitle` / `previewDescription` / `previewImage` | strings | Attach a link preview |
+| `voiceNote` | bool | Mark an audio attachment as a voice note |
+| `groupId` | string | Send to a group instead of `recipient` |
+| `noteToSelf` | bool | Send to your own account |
+
+This isn't an exhaustive list — any parameter signal-cli's `send` JSON-RPC
+method accepts works, whether or not it's named above. See
+[`SendCommand.java`](https://github.com/AsamK/signal-cli/blob/master/src/main/java/org/asamk/signal/commands/SendCommand.java)
+in signal-cli for the canonical, versioned source of truth. If a future
+refactor ever replaces this passthrough with a typed request struct, every
+field in this table (plus `account`/`recipient`/`message`/`attachment`) must
+keep working, or it's a breaking change for production callers depending on
+it today.
+
 ## Receive messages
 
 ### WebSocket (recommended for bots)
@@ -178,6 +232,8 @@ INFO rpc_method="send" status=201 latency_ms=1150
 | POST | `/v1/groups/{number}/{groupid}/join` | Join group |
 | POST | `/v1/groups/{number}/{groupid}/quit` | Quit group |
 | POST | `/v1/groups/{number}/{groupid}/block` | Block group |
+| GET | `/v1/groups/{number}/{groupid}/avatar` | Get group avatar |
+| DELETE | `/v1/groups/{number}/{groupid}/messages` | Admin-delete a message (requires group admin) |
 
 ### Contacts
 
@@ -186,7 +242,12 @@ INFO rpc_method="send" status=201 latency_ms=1150
 | GET | `/v1/contacts/{number}` | List contacts |
 | GET | `/v1/contacts/{number}/{recipient}` | Get contact |
 | PUT | `/v1/contacts/{number}` | Update contact |
+| DELETE | `/v1/contacts/{number}/{recipient}` | Remove contact |
 | POST | `/v1/contacts/{number}/sync` | Sync contacts |
+| GET | `/v1/contacts/{number}/{recipient}/avatar` | Get contact avatar |
+| POST | `/v1/contacts/{number}/{recipient}/block` | Block contact |
+| DELETE | `/v1/contacts/{number}/{recipient}/block` | Unblock contact |
+| PUT | `/v1/contacts/{number}/message-requests` | Accept/delete a message request |
 
 ### Accounts
 
@@ -197,11 +258,14 @@ INFO rpc_method="send" status=201 latency_ms=1150
 | POST | `/v1/register/{number}/verify/{token}` | Verify |
 | POST | `/v1/unregister/{number}` | Unregister |
 | POST | `/v1/accounts/{number}/rate-limit-challenge` | Rate-limit challenge |
-| PUT | `/v1/accounts/{number}/settings` | Update settings |
+| PUT | `/v1/accounts/{number}/settings` | Update account attributes (device name, unidentified/discoverability/number-sharing) |
 | POST | `/v1/accounts/{number}/pin` | Set PIN |
 | DELETE | `/v1/accounts/{number}/pin` | Remove PIN |
 | POST | `/v1/accounts/{number}/username` | Set username |
 | DELETE | `/v1/accounts/{number}/username` | Remove username |
+| POST | `/v1/accounts/{number}/sync-request` | Request a full sync from the primary device |
+| POST | `/v1/accounts/{number}/number` | Start a phone number change |
+| POST | `/v1/accounts/{number}/number/verify` | Finish a phone number change |
 
 ### Devices
 
@@ -209,8 +273,10 @@ INFO rpc_method="send" status=201 latency_ms=1150
 |--------|----------|-------------|
 | GET | `/v1/devices/{number}` | List devices |
 | POST | `/v1/devices/{number}` | Link device |
+| PUT | `/v1/devices/{number}/{device_id}` | Rename a linked device |
 | DELETE | `/v1/devices/{number}/{device_id}` | Remove device |
 | DELETE | `/v1/devices/{number}/local-data` | Delete local data |
+| POST | `/v1/devices/{number}/add` | Approve linking a new device (primary device only) |
 | GET | `/v1/qrcodelink` | QR code link URI |
 | GET | `/v1/qrcodelink/raw` | Raw link URI |
 
@@ -222,23 +288,38 @@ INFO rpc_method="send" status=201 latency_ms=1150
 | PUT | `/v1/identities/{number}/trust/{number_to_trust}` | Trust identity |
 | PUT | `/v1/profiles/{number}` | Update profile |
 
-### Polls & Stickers
+### Polls, Stickers & Stories
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/v1/polls/{number}` | Create poll |
 | POST | `/v1/polls/{number}/vote` | Vote |
-| DELETE | `/v1/polls/{number}` | Close poll |
+| DELETE | `/v1/polls/{number}` | Terminate (close) poll |
 | GET | `/v1/sticker-packs/{number}` | List sticker packs |
-| POST | `/v1/sticker-packs/{number}` | Install sticker pack |
+| POST | `/v1/sticker-packs/{number}` | Install sticker pack (by `uri`, or `pack_id`+`pack_key`) |
+| GET | `/v1/sticker-packs/{number}/{pack_id}/{sticker_id}` | Get a single sticker |
+| POST | `/v1/stories/{number}` | Post a story |
+| POST | `/v1/pins/{number}` | Pin a message |
+| POST | `/v1/pins/{number}/unpin` | Unpin a message |
+| POST | `/v1/payments/{number}` | Send a payment notification |
+
+### Calls
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/calls/{number}` | List active calls |
+| POST | `/v1/calls/{number}` | Start an outgoing call |
+| POST | `/v1/calls/{number}/{call_id}/accept` | Accept an incoming call |
+| POST | `/v1/calls/{number}/{call_id}/reject` | Reject an incoming call |
+| POST | `/v1/calls/{number}/{call_id}/hangup` | Hang up an active call |
 
 ### Attachments & Search
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/v1/attachments` | List attachments |
+| GET | `/v1/attachments` | ⚠️ Broken - `listAttachments` isn't a real signal-cli RPC method, see `src/routes/attachments.rs` |
 | GET | `/v1/attachments/{id}` | Get attachment |
-| DELETE | `/v1/attachments/{id}` | Delete attachment |
+| DELETE | `/v1/attachments/{id}` | ⚠️ Broken - `deleteAttachment` isn't a real signal-cli RPC method, see `src/routes/attachments.rs` |
 | GET | `/v1/search/{number}?numbers=+111,+222` | Check registration status |
 
 ### Webhooks
@@ -254,10 +335,20 @@ INFO rpc_method="send" status=201 latency_ms=1150
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/v1/health` | Health check (204) |
-| GET | `/v1/about` | Version and build info |
+| GET | `/v1/about` | This wrapper's own version and build info |
+| GET | `/v1/version` | signal-cli's own reported version |
 | GET | `/v1/openapi.json` | OpenAPI 3.0 spec |
 | GET | `/v1/events/{number}` | SSE stream |
 | GET | `/metrics` | Prometheus metrics |
+
+`GET/POST /v1/configuration` and `GET/POST /v1/configuration/{number}/settings`
+also exist but are **broken** - they call `getConfiguration`/
+`setConfiguration`/`getAccountSettings`/`setAccountSettings`, none of which
+are real signal-cli JSON-RPC methods (`getConfiguration`/`setConfiguration`
+only exist on signal-cli's D-Bus interface; the account-settings pair don't
+exist anywhere in signal-cli). See `src/routes/config.rs` for the full
+explanation and what real signal-cli capability (`updateConfiguration`) this
+would need to be rebuilt around.
 
 ## Building from source
 

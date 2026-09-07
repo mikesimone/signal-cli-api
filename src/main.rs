@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 mod daemon;
 mod jsonrpc;
 mod middleware;
