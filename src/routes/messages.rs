@@ -35,7 +35,7 @@ static ATTACHMENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// path, so spill data-URI attachments to disk and hand signal-cli the path
 /// instead, sidestepping the JVM's JSON parser for the bulky part entirely.
 /// Files are cleaned up once the send RPC call returns (success or error).
-struct SpilledAttachments(Vec<PathBuf>);
+pub(crate) struct SpilledAttachments(Vec<PathBuf>);
 
 impl Drop for SpilledAttachments {
     fn drop(&mut self) {
@@ -45,7 +45,7 @@ impl Drop for SpilledAttachments {
     }
 }
 
-fn spill_attachments_to_disk(body: &mut Value) -> std::io::Result<SpilledAttachments> {
+pub(crate) fn spill_attachments_to_disk(body: &mut Value) -> std::io::Result<SpilledAttachments> {
     let mut written = Vec::new();
     if let Some(Value::Array(attachments)) = body.get_mut("attachment") {
         let dir = std::path::Path::new(ATTACHMENT_SPILL_DIR);

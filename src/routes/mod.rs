@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod avatar;
+pub mod calls;
 pub mod helpers;
 pub mod attachments;
 pub mod config;
@@ -11,12 +12,15 @@ pub mod identities;
 pub mod messages;
 pub mod metrics;
 pub mod openapi;
+pub mod payments;
+pub mod pinned_messages;
 pub mod polls;
 pub mod profiles;
 pub mod reactions;
 pub mod receipts;
 pub mod search;
 pub mod stickers;
+pub mod stories;
 pub mod system;
 pub mod typing;
 pub mod webhook_routes;
@@ -42,6 +46,10 @@ pub fn router(state: AppState) -> Router {
         .merge(search::routes())
         .merge(stickers::routes())
         .merge(config::routes())
+        .merge(stories::routes())
+        .merge(payments::routes())
+        .merge(pinned_messages::routes())
+        .merge(calls::routes())
         // Extras beyond bbernhard parity
         .merge(webhook_routes::routes())
         .merge(events::routes())

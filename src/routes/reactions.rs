@@ -28,6 +28,12 @@ async fn send_reaction(
 }
 
 /// DELETE /v1/reactions/{number} — remove a reaction from a message.
+///
+/// signal-cli has no standalone "removeReaction" RPC method - reactions are
+/// added and removed through the same `sendReaction` command, with a
+/// `remove: true` flag distinguishing the two (see SendReactionCommand's
+/// `--remove` flag in signal-cli). Calling a nonexistent "removeReaction"
+/// method returned a JSON-RPC "Method not found" error from real signal-cli.
 async fn remove_reaction(
     State(st): State<AppState>,
     Path(number): Path<String>,
@@ -35,5 +41,6 @@ async fn remove_reaction(
 ) -> Response {
     let mut params = body;
     params["account"] = json!(number);
-    rpc_no_content(&st, "removeReaction", params).await
+    params["remove"] = json!(true);
+    rpc_no_content(&st, "sendReaction", params).await
 }

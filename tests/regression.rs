@@ -8,12 +8,19 @@ use tower_http::cors::CorsLayer;
 /// Start a mock TCP server that speaks newline-delimited JSON-RPC.
 /// Returns canned responses based on the method name.
 /// The "simulateError" method returns a JSON-RPC error to test error paths.
-async fn start_mock_signal_cli() -> SocketAddr {
+///
+/// Every request it receives (method + params, exactly as decoded off the
+/// wire) is also appended to `captured`, so tests can assert on the *exact*
+/// params signal-cli would have seen - this is what makes it possible to
+/// prove the `/v2/send` passthrough forwards undocumented fields verbatim,
+/// rather than just checking the HTTP response status.
+async fn start_mock_signal_cli(captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>) -> SocketAddr {
     let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
+            let captured = captured.clone();
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.into_split();
                 let mut lines = BufReader::new(reader).lines();
@@ -24,6 +31,10 @@ async fn start_mock_signal_cli() -> SocketAddr {
                     };
                     let id = req["id"].clone();
                     let method = req["method"].as_str().unwrap_or("");
+                    captured.lock().await.push(serde_json::json!({
+                        "method": method,
+                        "params": req.get("params").cloned().unwrap_or(serde_json::json!({})),
+                    }));
 
                     // Special: return a JSON-RPC error for "simulateError"
                     // OR when account/number is "+ERROR" (triggers error path on any endpoint)
@@ -86,11 +97,14 @@ async fn start_mock_signal_cli() -> SocketAddr {
                         "verify" => serde_json::json!({}),
                         "unregister" => serde_json::json!({}),
                         "submitRateLimitChallenge" => serde_json::json!({}),
-                        "updateAccountSettings" => serde_json::json!({}),
+                        "updateAccount" => serde_json::json!({}),
                         "setPin" => serde_json::json!({}),
                         "removePin" => serde_json::json!({}),
-                        "setUsername" => serde_json::json!({}),
-                        "removeUsername" => serde_json::json!({}),
+                        "sendSyncRequest" => serde_json::json!({}),
+                        "startChangeNumber" => serde_json::json!({}),
+                        "finishChangeNumber" => serde_json::json!({}),
+                        "addDevice" => serde_json::json!({}),
+                        "updateDevice" => serde_json::json!({}),
 
                         // Devices
                         "listDevices" => {
@@ -108,7 +122,6 @@ async fn start_mock_signal_cli() -> SocketAddr {
 
                         // Reactions
                         "sendReaction" => serde_json::json!({"timestamp": 1234567890}),
-                        "removeReaction" => serde_json::json!({}),
 
                         // Receipts
                         "sendReceipt" => serde_json::json!({}),
@@ -122,12 +135,13 @@ async fn start_mock_signal_cli() -> SocketAddr {
                         "listStickerPacks" => {
                             serde_json::json!([{"packId": "sp1", "title": "Cool Pack"}])
                         }
-                        "uploadStickerPack" => serde_json::json!({"packId": "sp2"}),
+                        "addStickerPack" => serde_json::json!({"packId": "sp2"}),
+                        "getSticker" => serde_json::json!({"data": "c3RpY2tlcg=="}),
 
                         // Polls
-                        "sendPoll" => serde_json::json!({"timestamp": 1234567890}),
+                        "sendPollCreate" => serde_json::json!({"timestamp": 1234567890}),
                         "sendPollVote" => serde_json::json!({}),
-                        "closePoll" => serde_json::json!({}),
+                        "sendPollTerminate" => serde_json::json!({}),
 
                         // Attachments
                         "listAttachments" => {
@@ -145,6 +159,32 @@ async fn start_mock_signal_cli() -> SocketAddr {
                             serde_json::json!({"trustMode": "on-first-use"})
                         }
                         "setAccountSettings" => serde_json::json!({}),
+                        "updateConfiguration" => serde_json::json!({}),
+
+                        // Avatars
+                        "getAvatar" => serde_json::json!({"data": "YXZhdGFy"}),
+
+                        // Contacts / message requests
+                        "removeContact" => serde_json::json!({}),
+                        "unblock" => serde_json::json!({}),
+                        "sendMessageRequestResponse" => serde_json::json!({}),
+
+                        // Stories, pins, payments
+                        "sendStory" => serde_json::json!({"timestamp": 1234567890}),
+                        "sendPinMessage" => serde_json::json!({}),
+                        "sendUnpinMessage" => serde_json::json!({}),
+                        "sendPaymentNotification" => serde_json::json!({"timestamp": 1234567890}),
+                        "sendAdminDelete" => serde_json::json!({}),
+
+                        // Calls
+                        "listCalls" => serde_json::json!([]),
+                        "startCall" => serde_json::json!({"callId": 1}),
+                        "acceptCall" => serde_json::json!({"callId": 1}),
+                        "rejectCall" => serde_json::json!({}),
+                        "hangupCall" => serde_json::json!({}),
+
+                        // Version
+                        "version" => serde_json::json!({"version": "0.14.7"}),
 
                         // Default: return empty object
                         _ => serde_json::json!({}),
@@ -168,12 +208,15 @@ struct TestHarness {
     base_url: String,
     broadcast_tx: broadcast::Sender<String>,
     metrics: Arc<signal_cli_api::state::Metrics>,
+    /// Every {method, params} pair the mock signal-cli received, in order.
+    captured_rpc_calls: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 /// Connect to the mock signal-cli, build AppState, spawn the reader loop,
 /// start the axum server on a random port, and return the full harness.
 async fn setup_full() -> TestHarness {
-    let mock_addr = start_mock_signal_cli().await;
+    let captured_rpc_calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mock_addr = start_mock_signal_cli(captured_rpc_calls.clone()).await;
     let stream = tokio::net::TcpStream::connect(mock_addr).await.unwrap();
     let (reader, writer) = stream.into_split();
 
@@ -206,6 +249,7 @@ async fn setup_full() -> TestHarness {
         base_url: format!("http://{addr}"),
         broadcast_tx,
         metrics,
+        captured_rpc_calls,
     }
 }
 
@@ -333,6 +377,111 @@ async fn test_send_v2_unicode_message() {
 async fn test_remote_delete() {
     let base = setup().await;
     assert_json_request(&base, "DELETE", "/v1/remote-delete/+123", serde_json::json!({"recipient": "+9999", "timestamp": 12345}), 200).await;
+}
+
+// ===========================================================================
+// The `send` contract: pure passthrough, proven field-by-field
+//
+// /v2/send has no field whitelist - whatever is in the request body reaches
+// signal-cli's `send` JSON-RPC method verbatim (attachments are the sole
+// exception, spilled to disk before forwarding). These tests inspect what
+// the mock signal-cli actually received, not just the HTTP response, to
+// prove that decision is real and durable rather than an assumption.
+// ===========================================================================
+
+#[tokio::test]
+async fn test_send_passthrough_forwards_undocumented_fields_verbatim() {
+    let harness = setup_full().await;
+    let client = reqwest::Client::new();
+    // editTimestamp is deliberately NOT a typed/whitelisted field anywhere
+    // in this codebase - it only works because /v2/send has no whitelist.
+    // Also throw in a handful of other undocumented-but-real signal-cli
+    // fields to prove this isn't editTimestamp-specific.
+    let res = client
+        .post(format!("{}/v2/send", harness.base_url))
+        .json(&serde_json::json!({
+            "account": "+1234567890",
+            "message": "edited!",
+            "recipient": ["+9999"],
+            "editTimestamp": 1111111111,
+            "noUrgent": true,
+            "textStyle": ["0:6:BOLD"],
+            "somethingSignalCliMightAddTomorrow": "unknown-but-still-forwarded",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201);
+
+    let calls = harness.captured_rpc_calls.lock().await;
+    let send_call = calls
+        .iter()
+        .find(|c| c["method"] == "send")
+        .expect("mock signal-cli should have received a `send` call");
+    let params = &send_call["params"];
+    assert_eq!(params["account"], "+1234567890");
+    assert_eq!(params["editTimestamp"], 1111111111);
+    assert_eq!(params["noUrgent"], true);
+    assert_eq!(params["textStyle"], serde_json::json!(["0:6:BOLD"]));
+    assert_eq!(params["somethingSignalCliMightAddTomorrow"], "unknown-but-still-forwarded");
+}
+
+#[tokio::test]
+async fn test_send_passthrough_account_field_is_required_not_number() {
+    // Documents (and guards) the real contract: `account` is what
+    // signal-cli's JSON-RPC dispatcher looks for to pick a manager on a
+    // multi-account daemon - `number` is not a recognized alias and is
+    // forwarded as an inert extra field, exactly as sent.
+    let harness = setup_full().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{}/v2/send", harness.base_url))
+        .json(&serde_json::json!({
+            "message": "hi",
+            "number": "+1234567890",
+            "recipients": ["+9999"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    // The mock doesn't enforce signal-cli's real "account is required"
+    // validation, so this still returns 201 here - the point is what
+    // params actually crossed the wire.
+    assert_eq!(res.status(), 201);
+    let calls = harness.captured_rpc_calls.lock().await;
+    let send_call = calls.iter().find(|c| c["method"] == "send").unwrap();
+    let params = &send_call["params"];
+    // "number" is forwarded verbatim, unmodified into "account" - proving
+    // there is no field-name translation happening anywhere in this path.
+    assert!(params.get("account").is_none());
+    assert_eq!(params["number"], "+1234567890");
+}
+
+#[tokio::test]
+async fn test_send_passthrough_attachment_field_is_spilled_not_base64_attachments() {
+    // spill_attachments_to_disk only ever looks at the real signal-cli
+    // field name `attachment` - `base64_attachments` (the bbernhard-style
+    // name used elsewhere in this test file for historical/back-compat
+    // reasons) is passed through completely untouched, not spilled.
+    let harness = setup_full().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{}/v2/send", harness.base_url))
+        .json(&serde_json::json!({
+            "account": "+1234567890",
+            "message": "hi",
+            "recipient": ["+9999"],
+            "base64_attachments": ["aGVsbG8="],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201);
+    let calls = harness.captured_rpc_calls.lock().await;
+    let send_call = calls.iter().find(|c| c["method"] == "send").unwrap();
+    let params = &send_call["params"];
+    assert_eq!(params["base64_attachments"], serde_json::json!(["aGVsbG8="]));
+    assert!(params.get("attachment").is_none());
 }
 
 // ===========================================================================
@@ -515,10 +664,16 @@ async fn test_groups_block() {
 }
 
 #[tokio::test]
-async fn test_groups_avatar_not_implemented() {
+async fn test_groups_avatar() {
     let base = setup().await;
-    let body = assert_get(&base, "/v1/groups/+123/g1/avatar", 501).await.unwrap();
-    assert!(body.get("error").is_some());
+    let body = assert_get(&base, "/v1/groups/+123/g1/avatar", 200).await.unwrap();
+    assert!(body.get("data").is_some());
+}
+
+#[tokio::test]
+async fn test_groups_admin_delete_message() {
+    let base = setup().await;
+    assert_json_request(&base, "DELETE", "/v1/groups/+123/g1/messages", serde_json::json!({"target_author": "+9999", "target_timestamp": 12345}), 200).await;
 }
 
 // ===========================================================================
@@ -559,10 +714,35 @@ async fn test_contacts_sync() {
 }
 
 #[tokio::test]
-async fn test_contacts_avatar_not_implemented() {
+async fn test_contacts_avatar() {
     let base = setup().await;
-    let body = assert_get(&base, "/v1/contacts/+123/+1111/avatar", 501).await.unwrap();
-    assert!(body.get("error").is_some());
+    let body = assert_get(&base, "/v1/contacts/+123/+1111/avatar", 200).await.unwrap();
+    assert!(body.get("data").is_some());
+}
+
+#[tokio::test]
+async fn test_contacts_remove() {
+    let base = setup().await;
+    assert_no_body_request(&base, "DELETE", "/v1/contacts/+123/+1111", 200).await;
+}
+
+#[tokio::test]
+async fn test_contacts_remove_with_forget() {
+    let base = setup().await;
+    assert_json_request(&base, "DELETE", "/v1/contacts/+123/+1111", serde_json::json!({"forget": true}), 200).await;
+}
+
+#[tokio::test]
+async fn test_contacts_block_and_unblock() {
+    let base = setup().await;
+    assert_no_body_request(&base, "POST", "/v1/contacts/+123/+1111/block", 200).await;
+    assert_no_body_request(&base, "DELETE", "/v1/contacts/+123/+1111/block", 200).await;
+}
+
+#[tokio::test]
+async fn test_contacts_message_request_accept() {
+    let base = setup().await;
+    assert_json_request(&base, "PUT", "/v1/contacts/+123/message-requests", serde_json::json!({"recipient": "+9999", "type": "accept"}), 204).await;
 }
 
 // ===========================================================================
@@ -825,8 +1005,27 @@ async fn test_stickers_list() {
 #[tokio::test]
 async fn test_stickers_install() {
     let base = setup().await;
-    let body = assert_json_request(&base, "POST", "/v1/sticker-packs/+123", serde_json::json!({"packId": "abc123", "packKey": "key456"}), 201).await;
+    let body = assert_json_request(&base, "POST", "/v1/sticker-packs/+123", serde_json::json!({"pack_id": "abc123", "pack_key": "key456"}), 201).await;
     assert_eq!(body.unwrap()["packId"], "sp2");
+}
+
+#[tokio::test]
+async fn test_stickers_install_by_uri() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/sticker-packs/+123", serde_json::json!({"uri": "https://signal.art/addstickers/#pack_id=abc123&pack_key=key456"}), 201).await;
+}
+
+#[tokio::test]
+async fn test_stickers_install_missing_fields() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/sticker-packs/+123", serde_json::json!({}), 400).await;
+}
+
+#[tokio::test]
+async fn test_sticker_get() {
+    let base = setup().await;
+    let body = assert_get(&base, "/v1/sticker-packs/+123/pack1/0", 200).await.unwrap();
+    assert!(body.get("data").is_some());
 }
 
 // ===========================================================================
@@ -843,13 +1042,13 @@ async fn test_polls_create() {
 #[tokio::test]
 async fn test_polls_vote() {
     let base = setup().await;
-    assert_json_request(&base, "POST", "/v1/polls/+123/vote", serde_json::json!({"recipient": "+9999", "pollId": "poll1", "optionIndex": 0}), 200).await;
+    assert_json_request(&base, "POST", "/v1/polls/+123/vote", serde_json::json!({"recipient": "+9999", "poll_author": "+9999", "poll_timestamp": 12345, "option": 0}), 200).await;
 }
 
 #[tokio::test]
 async fn test_polls_close() {
     let base = setup().await;
-    assert_json_request(&base, "DELETE", "/v1/polls/+123", serde_json::json!({"recipient": "+9999", "pollId": "poll1"}), 200).await;
+    assert_json_request(&base, "DELETE", "/v1/polls/+123", serde_json::json!({"recipient": "+9999", "poll_timestamp": 12345}), 200).await;
 }
 
 // ===========================================================================
@@ -1711,7 +1910,7 @@ async fn setup_tls() -> (String, reqwest::Client) {
     // rustls 0.23+ requires an explicit crypto provider
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let mock_addr = start_mock_signal_cli().await;
+    let mock_addr = start_mock_signal_cli(Arc::new(tokio::sync::Mutex::new(Vec::new()))).await;
     let stream = tokio::net::TcpStream::connect(mock_addr).await.unwrap();
     let (reader, writer) = stream.into_split();
 
@@ -2583,8 +2782,9 @@ async fn test_poll_lifecycle() {
         .post(format!("{base}/v1/polls/+123/vote"))
         .json(&serde_json::json!({
             "recipient": "+999",
-            "pollId": "poll1",
-            "optionIndex": 0
+            "poll_author": "+999",
+            "poll_timestamp": 12345,
+            "option": 0
         }))
         .send()
         .await
@@ -2596,7 +2796,7 @@ async fn test_poll_lifecycle() {
         .delete(format!("{base}/v1/polls/+123"))
         .json(&serde_json::json!({
             "recipient": "+999",
-            "pollId": "poll1"
+            "poll_timestamp": 12345
         }))
         .send()
         .await
@@ -3319,7 +3519,7 @@ async fn test_stickers_list_response_structure() {
 #[tokio::test]
 async fn test_stickers_install_returns_pack_id() {
     let base = setup().await;
-    let body = assert_json_request(&base, "POST", "/v1/sticker-packs/+123", serde_json::json!({"packId": "new-pack", "packKey": "secret-key"}), 201).await;
+    let body = assert_json_request(&base, "POST", "/v1/sticker-packs/+123", serde_json::json!({"pack_id": "new-pack", "pack_key": "secret-key"}), 201).await;
     assert!(body.unwrap().get("packId").is_some());
 }
 
@@ -3683,13 +3883,13 @@ async fn test_accounts_remove_username_rpc_error() {
 #[tokio::test]
 async fn test_polls_vote_rpc_error() {
     let base = setup().await;
-    assert_json_request(&base, "POST", "/v1/polls/+ERROR/vote", serde_json::json!({"recipient": "+999", "poll_id": "p1", "options": [0]}), 400).await;
+    assert_json_request(&base, "POST", "/v1/polls/+ERROR/vote", serde_json::json!({"recipient": "+999", "poll_author": "+999", "poll_timestamp": 12345, "option": 0}), 400).await;
 }
 
 #[tokio::test]
 async fn test_polls_close_rpc_error() {
     let base = setup().await;
-    assert_json_request(&base, "DELETE", "/v1/polls/+ERROR", serde_json::json!({"recipient": "+999", "poll_id": "p1"}), 400).await;
+    assert_json_request(&base, "DELETE", "/v1/polls/+ERROR", serde_json::json!({"recipient": "+999", "poll_timestamp": 12345}), 400).await;
 }
 
 #[tokio::test]
@@ -4138,4 +4338,126 @@ async fn test_sse_content_type() {
     assert_eq!(res.status(), 200);
     let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(ct.contains("text/event-stream"), "SSE should have text/event-stream content type, got {ct}");
+}
+
+// ===========================================================================
+// Gap-fill routes: methods signal-cli exposes that had no route at all
+// before this pass (see the gap analysis against signal-cli 0.14.7's full
+// Commands.java registry).
+// ===========================================================================
+
+#[tokio::test]
+async fn test_system_version() {
+    let base = setup().await;
+    let body = assert_get(&base, "/v1/version", 200).await.unwrap();
+    assert!(body.get("version").is_some());
+}
+
+#[tokio::test]
+async fn test_accounts_sync_request() {
+    let base = setup().await;
+    assert_no_body_request(&base, "POST", "/v1/accounts/+123/sync-request", 204).await;
+}
+
+#[tokio::test]
+async fn test_accounts_start_change_number() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/accounts/+123/number", serde_json::json!({"number": "+19995551234"}), 204).await;
+}
+
+#[tokio::test]
+async fn test_accounts_start_change_number_voice() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/accounts/+123/number", serde_json::json!({"number": "+19995551234", "voice": true}), 204).await;
+}
+
+#[tokio::test]
+async fn test_accounts_finish_change_number() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/accounts/+123/number/verify", serde_json::json!({"number": "+19995551234", "verification_code": "123456"}), 204).await;
+}
+
+#[tokio::test]
+async fn test_accounts_update_settings_real_fields() {
+    let base = setup().await;
+    assert_json_request(&base, "PUT", "/v1/accounts/+123/settings", serde_json::json!({"device_name": "My Bot", "discoverable_by_number": false}), 204).await;
+}
+
+#[tokio::test]
+async fn test_devices_update_name() {
+    let base = setup().await;
+    assert_json_request(&base, "PUT", "/v1/devices/+123/2", serde_json::json!({"device_name": "Renamed"}), 204).await;
+}
+
+#[tokio::test]
+async fn test_devices_add() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/devices/+123/add", serde_json::json!({"uri": "sgnl://linkdevice?uuid=test&pub_key=abc"}), 204).await;
+}
+
+#[tokio::test]
+async fn test_send_story() {
+    let base = setup().await;
+    let body = assert_json_request(&base, "POST", "/v1/stories/+123", serde_json::json!({"attachment": "data:image/png;filename=pic.png;base64,aGVsbG8="}), 201).await;
+    assert_eq!(body.unwrap()["timestamp"], 1234567890);
+}
+
+#[tokio::test]
+async fn test_send_story_to_group() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/stories/+123", serde_json::json!({"attachment": "data:image/png;filename=pic.png;base64,aGVsbG8=", "group_id": "g1", "no_replies": true}), 201).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_notification() {
+    let base = setup().await;
+    let body = assert_json_request(&base, "POST", "/v1/payments/+123", serde_json::json!({"recipient": "+9999", "receipt": "aGVsbG8=", "note": "thanks!"}), 201).await;
+    assert_eq!(body.unwrap()["timestamp"], 1234567890);
+}
+
+#[tokio::test]
+async fn test_pin_message() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/pins/+123", serde_json::json!({"recipient": "+9999", "target_author": "+9999", "target_timestamp": 12345}), 200).await;
+}
+
+#[tokio::test]
+async fn test_unpin_message() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/pins/+123/unpin", serde_json::json!({"recipient": "+9999", "target_author": "+9999", "target_timestamp": 12345}), 200).await;
+}
+
+#[tokio::test]
+async fn test_calls_list_empty() {
+    let base = setup().await;
+    let body = assert_get(&base, "/v1/calls/+123", 200).await.unwrap();
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_calls_start_accept_reject_hangup() {
+    let base = setup().await;
+    assert_json_request(&base, "POST", "/v1/calls/+123", serde_json::json!({"recipient": "+9999"}), 201).await;
+    assert_no_body_request(&base, "POST", "/v1/calls/+123/1/accept", 200).await;
+    assert_no_body_request(&base, "POST", "/v1/calls/+123/1/reject", 200).await;
+    assert_no_body_request(&base, "POST", "/v1/calls/+123/1/hangup", 200).await;
+}
+
+#[tokio::test]
+async fn test_reaction_remove_uses_send_reaction_with_remove_flag() {
+    // Regression guard for the fixed bug: DELETE /v1/reactions used to call
+    // a nonexistent "removeReaction" RPC method. It must now call the real
+    // "sendReaction" method with remove: true.
+    let harness = setup_full().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .delete(format!("{}/v1/reactions/+123", harness.base_url))
+        .json(&serde_json::json!({"recipient": "+9999", "reaction": "👍", "target_author": "+9999", "timestamp": 12345}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+    let calls = harness.captured_rpc_calls.lock().await;
+    assert!(calls.iter().any(|c| c["method"] == "sendReaction" && c["params"]["remove"] == true));
+    assert!(!calls.iter().any(|c| c["method"] == "removeReaction"));
 }

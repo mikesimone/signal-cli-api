@@ -14,11 +14,15 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/qrcodelink", get(qrcodelink))
         .route("/v1/qrcodelink/raw", get(qrcodelink_raw))
         .route("/v1/devices/{number}", post(link_device).get(list_devices))
-        .route("/v1/devices/{number}/{device_id}", delete(remove_device))
+        .route(
+            "/v1/devices/{number}/{device_id}",
+            delete(remove_device).put(update_device),
+        )
         .route(
             "/v1/devices/{number}/local-data",
             delete(delete_local_data),
         )
+        .route("/v1/devices/{number}/add", post(add_device))
 }
 
 #[derive(Deserialize)]
@@ -94,4 +98,40 @@ async fn remove_device(
 
 async fn delete_local_data(Path(number): Path<String>, State(st): State<AppState>) -> Response {
     rpc_no_content(&st, "deleteLocalAccountData", json!({ "account": number })).await
+}
+
+#[derive(Deserialize)]
+struct UpdateDeviceBody {
+    device_name: String,
+}
+
+/// PUT /v1/devices/{number}/{device_id} — rename a linked device.
+async fn update_device(
+    Path((number, device_id)): Path<(String, i64)>,
+    State(st): State<AppState>,
+    Json(body): Json<UpdateDeviceBody>,
+) -> Response {
+    rpc_no_content(&st, "updateDevice", json!({
+        "account": number,
+        "deviceId": device_id,
+        "deviceName": body.device_name,
+    })).await
+}
+
+#[derive(Deserialize)]
+struct AddDeviceBody {
+    uri: String,
+}
+
+/// POST /v1/devices/{number}/add — approve linking a new device to this
+/// account, from the primary device's side (the inverse of the
+/// `/v1/devices/{number}` link flow, which is for this API instance
+/// linking itself *to* another primary). Only works if this account is the
+/// primary device; signal-cli's `addDevice` RPC method.
+async fn add_device(
+    Path(number): Path<String>,
+    State(st): State<AppState>,
+    Json(body): Json<AddDeviceBody>,
+) -> Response {
+    rpc_no_content(&st, "addDevice", json!({ "account": number, "uri": body.uri })).await
 }

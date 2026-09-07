@@ -1,7 +1,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -29,6 +29,10 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/groups/{number}/{groupid}/join", post(join_group))
         .route("/v1/groups/{number}/{groupid}/quit", post(quit_group))
         .route("/v1/groups/{number}/{groupid}/block", post(block_group))
+        .route(
+            "/v1/groups/{number}/{groupid}/messages",
+            delete(admin_delete_message),
+        )
 }
 
 // ---- List / Get -----------------------------------------------------------
@@ -209,10 +213,13 @@ async fn remove_admins(
 
 // ---- Avatar / Join / Quit / Block -----------------------------------------
 
+/// GET /v1/groups/{number}/{groupid}/avatar — retrieve a group's avatar,
+/// base64 encoded, via signal-cli's `getAvatar` RPC method.
 async fn get_avatar(
-    Path((_number, _groupid)): Path<(String, String)>,
+    State(st): State<AppState>,
+    Path((number, groupid)): Path<(String, String)>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": "Group avatar retrieval not yet implemented" }))).into_response()
+    rpc_ok(&st, "getAvatar", json!({ "account": number, "group-id": groupid })).await
 }
 
 async fn join_group(
@@ -234,4 +241,34 @@ async fn block_group(
     Path((number, groupid)): Path<(String, String)>,
 ) -> Response {
     rpc_ok(&st, "block", json!({ "account": number, "group-id": groupid })).await
+}
+
+// ---- Admin delete -----------------------------------------------------
+
+#[derive(Deserialize)]
+struct AdminDeleteBody {
+    target_author: String,
+    target_timestamp: i64,
+    #[serde(default)]
+    story: Option<bool>,
+}
+
+/// DELETE /v1/groups/{number}/{groupid}/messages — admin-delete a message
+/// in this group (removes it for all members; requires this account to be
+/// a group admin). signal-cli's `sendAdminDelete` RPC method.
+async fn admin_delete_message(
+    State(st): State<AppState>,
+    Path((number, groupid)): Path<(String, String)>,
+    Json(body): Json<AdminDeleteBody>,
+) -> Response {
+    let mut params = json!({
+        "account": number,
+        "group-id": [groupid],
+        "target-author": body.target_author,
+        "target-timestamp": body.target_timestamp,
+    });
+    if let Some(true) = body.story {
+        params["story"] = json!(true);
+    }
+    rpc_ok(&st, "sendAdminDelete", params).await
 }
