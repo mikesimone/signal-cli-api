@@ -1,3 +1,5 @@
+> **Archived.** This fork has moved to **[mikesimone/modern-signal-cli-api](https://github.com/mikesimone/modern-signal-cli-api)** (one image: this bridge + a pinned stock signal-cli). Use that instead.
+
 # signal-cli-api
 
 A native REST + WebSocket API for [signal-cli](https://github.com/AsamK/signal-cli). Build Signal bots, notification systems, and integrations in any language.
